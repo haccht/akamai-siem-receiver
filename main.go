@@ -163,8 +163,8 @@ func (d B64URLString) MarshalJSON() ([]byte, error) {
 }
 
 func (s B64URLSlice) MarshalJSON() ([]byte, error) {
-	//return json.Marshal([]string(s))
-	return json.Marshal(strings.Join(s, ";"))
+	//return json.Marshal(strings.Join(s, ";"))
+	return json.Marshal([]string(s))
 }
 
 type HeaderLines []string
@@ -259,20 +259,16 @@ func getSIEMRecords(opts *Options, edgerc *edgegrid.Config) error {
 		}
 
 		if rec.Type == "akamai_siem" {
-			if err := enc.Encode(rec); err != nil {
-				continue
-			}
-		} else {
-			err := json.Unmarshal(line, &mdt)
-			if err != nil {
-				continue
-			}
-
-			opts.Offset = mdt.Offset
-			if err := enc.Encode(mdt); err != nil {
-				continue
-			}
+			enc.Encode(rec)
+			continue
 		}
+
+		if err := json.Unmarshal(line, &mdt); err != nil {
+			continue
+		}
+
+		opts.Offset = mdt.Offset
+		enc.Encode(mdt)
 	}
 	if err := sc.Err(); err != nil {
 		return err
@@ -291,9 +287,11 @@ func run() error {
 		os.Exit(1)
 	}
 
-	if egpath, err := homedir.Expand(opts.EdgeGridFile); err == nil {
-		opts.EdgeGridFile = egpath
+	egpath, err := homedir.Expand(opts.EdgeGridFile)
+	if err != nil {
+		return err
 	}
+	opts.EdgeGridFile = egpath
 
 	var edgerc *edgegrid.Config
 	if _, err := os.Stat(opts.EdgeGridFile); err == nil {
@@ -306,22 +304,21 @@ func run() error {
 		}
 	} else {
 		edgerc, _ = edgegrid.New()
-	}
-
-	if opts.Host != "" {
-		edgerc.Host = opts.Host
-	}
-	if opts.ClientToken != "" {
-		edgerc.ClientToken = opts.ClientToken
-	}
-	if opts.ClientSecret != "" {
-		edgerc.ClientSecret = opts.ClientSecret
-	}
-	if opts.AccessToken != "" {
-		edgerc.AccessToken = opts.AccessToken
+		if opts.Host != "" {
+			edgerc.Host = opts.Host
+		}
+		if opts.ClientToken != "" {
+			edgerc.ClientToken = opts.ClientToken
+		}
+		if opts.ClientSecret != "" {
+			edgerc.ClientSecret = opts.ClientSecret
+		}
+		if opts.AccessToken != "" {
+			edgerc.AccessToken = opts.AccessToken
+		}
 	}
 	if edgerc.Host == "" || edgerc.ClientToken == "" || edgerc.ClientSecret == "" || edgerc.AccessToken == "" {
-		return fmt.Errorf("failed to load EdgeGrid configuration")
+		return fmt.Errorf("failed to load edgegrid configuration")
 	}
 
 	if err := getSIEMRecords(&opts, edgerc); err != nil {
