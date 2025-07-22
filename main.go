@@ -15,6 +15,7 @@ import (
 
 	"github.com/akamai/AkamaiOPEN-edgegrid-golang/v11/pkg/edgegrid"
 	"github.com/jessevdk/go-flags"
+	"github.com/mitchellh/go-homedir"
 )
 
 type Options struct {
@@ -290,6 +291,10 @@ func run() error {
 		os.Exit(1)
 	}
 
+	if egpath, err := homedir.Expand(opts.EdgeGridFile); err == nil {
+		opts.EdgeGridFile = egpath
+	}
+
 	var edgerc *edgegrid.Config
 	if _, err := os.Stat(opts.EdgeGridFile); err == nil {
 		edgerc, err = edgegrid.New(
@@ -314,6 +319,9 @@ func run() error {
 	}
 	if opts.AccessToken != "" {
 		edgerc.AccessToken = opts.AccessToken
+	}
+	if edgerc.Host == "" || edgerc.ClientToken == "" || edgerc.ClientSecret == "" || edgerc.AccessToken == "" {
+		return fmt.Errorf("failed to load EdgeGrid configuration")
 	}
 
 	if err := getSIEMRecords(&opts, edgerc); err != nil {
