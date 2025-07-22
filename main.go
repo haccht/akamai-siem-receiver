@@ -243,6 +243,10 @@ func getSIEMRecords(opts *Options, edgerc *edgegrid.Config) error {
 		return fmt.Errorf("received %d %s\n", res.StatusCode, res.Status)
 	}
 
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "")
+	enc.SetEscapeHTML(false)
+
 	sc := bufio.NewScanner(res.Body)
 	for sc.Scan() {
 		var rec SIEMRecord
@@ -254,12 +258,9 @@ func getSIEMRecords(opts *Options, edgerc *edgegrid.Config) error {
 		}
 
 		if rec.Type == "akamai_siem" {
-			out, err := json.Marshal(rec)
-			if err != nil {
+			if err := enc.Encode(rec); err != nil {
 				continue
 			}
-
-			fmt.Println(string(out))
 		} else {
 			err := json.Unmarshal(line, &mdt)
 			if err != nil {
@@ -267,12 +268,9 @@ func getSIEMRecords(opts *Options, edgerc *edgegrid.Config) error {
 			}
 
 			opts.Offset = mdt.Offset
-
-			out, err := json.Marshal(mdt)
-			if err != nil {
+			if err := enc.Encode(mdt); err != nil {
 				continue
 			}
-			fmt.Println(string(out))
 		}
 	}
 	if err := sc.Err(); err != nil {
@@ -292,12 +290,17 @@ func run() error {
 		os.Exit(1)
 	}
 
-	edgerc, err := edgegrid.New(
-		edgegrid.WithFile(opts.EdgeGridFile),
-		edgegrid.WithSection(opts.EdgeGridSection),
-	)
-	if err != nil {
-		return err
+	var edgerc *edgegrid.Config
+	if _, err := os.Stat(opts.EdgeGridFile); err == nil {
+		edgerc, err = edgegrid.New(
+			edgegrid.WithFile(opts.EdgeGridFile),
+			edgegrid.WithSection(opts.EdgeGridSection),
+		)
+		if err != nil {
+			return err
+		}
+	} else {
+		edgerc, _ = edgegrid.New()
 	}
 
 	if opts.Host != "" {
