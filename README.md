@@ -70,7 +70,7 @@ CEF field mapping highlights:
 - `httpMessage.start` (Unix seconds) → `start` (Unix seconds)
 - `attackData.ruleTags` → `AkamaiSiemRuleTags`; `attackData.ruleActions` → `AkamaiSiemRuleActions`
 - `identity.ja4` (or `httpMessage.ja4`) → `AkamaiSiemJA4`; `identity.tlsFingerprintV2`/`identity.tlsFingerprintV3` (or legacy `httpMessage` fields) → `AkamaiSiemAKTLSFPv2`/`AkamaiSiemAKTLSFPv3`
-- `httpMessage.tlsVersion` → `AkamaiSiemTLSVersion`
+- `httpMessage.tlsVersion` (or `httpMessage.tls`) → `AkamaiSiemTLSVersion`
 - request/response headers, geo fields, and response status are passed through with `AkamaiSiem*` prefixes
 - Calculated fields per TechDocs: `attackData.appliedAction` drives `eventClassId` (`detect` for `alert`/`monitor`, else `mitigate`), which sets the CEF signature ID, `name` (`Activity detected` vs `Activity mitigated`), and `severity` (`5` vs `10`).
 

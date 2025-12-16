@@ -103,6 +103,7 @@ type HTTPMessage struct {
 	Port            string         `json:"port"`
 	Protocol        string         `json:"protocol"`
 	Query           RawQueryString `json:"query"`
+	TLS             string         `json:"tls"`
 	TLSVersion      string         `json:"tlsVersion"`
 	JA4             string         `json:"ja4"`
 	AKTLSFPv2       string         `json:"akTlsFpV2"`
@@ -303,7 +304,7 @@ func buildRequest(msg HTTPMessage) string {
 	}
 
 	scheme := "http"
-	if msg.TLSVersion != "" {
+	if firstNonEmpty(msg.TLSVersion, msg.TLS) != "" {
 		scheme = "https"
 	}
 
@@ -509,7 +510,7 @@ func appendContextExtensions(builder *cefBuilder, rec SIEMRecord) {
 	if res := formatHeaderLines(rec.HTTPMessage.ResponseHeaders); res != "" {
 		builder.add("AkamaiSiemResponseHeaders", res)
 	}
-	builder.add("AkamaiSiemTLSVersion", rec.HTTPMessage.TLSVersion)
+	builder.add("AkamaiSiemTLSVersion", firstNonEmpty(rec.HTTPMessage.TLSVersion, rec.HTTPMessage.TLS))
 	builder.add("AkamaiSiemResponseStatus", rec.HTTPMessage.Status)
 	builder.add("AkamaiSiemContinent", rec.Geo.Continent)
 	builder.add("AkamaiSiemCountry", rec.Geo.Country)
