@@ -68,7 +68,10 @@ CEF field mapping highlights:
 - `attackData.configId` → `flexString1` (with `flexString1Label=Security Config Id`); `attackData.policyId` → `flexString2` (with `flexString2Label=Firewall Policy Id`)
 - `httpMessage.bytes` → `out`
 - `httpMessage.start` (Unix seconds) → `start` (Unix seconds)
-- `attackData.ruleTags` → `AkamaiSiemRuleTags`; request/response headers and geo fields are passed through with `AkamaiSiem*` prefixes
+- `attackData.ruleTags` → `AkamaiSiemRuleTags`; `attackData.ruleActions` → `AkamaiSiemRuleActions`
+- `httpMessage.tlsVersion` → `AkamaiSiemTLSVersion`; `httpMessage.ja4` → `AkamaiSiemJA4`
+- `httpMessage.akTlsFpV2`/`httpMessage.akTlsFpV3` → `AkamaiSiemAKTLSFPv2`/`AkamaiSiemAKTLSFPv3`
+- request/response headers, geo fields, and response status are passed through with `AkamaiSiem*` prefixes
 - Severity derives from `userRiskData.score` or `botData.botScore`
 
 

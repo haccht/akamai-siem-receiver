@@ -101,6 +101,10 @@ type HTTPMessage struct {
 	Port            string         `json:"port"`
 	Protocol        string         `json:"protocol"`
 	Query           RawQueryString `json:"query"`
+	TLSVersion      string         `json:"tlsVersion"`
+	JA4             string         `json:"ja4"`
+	AKTLSFPv2       string         `json:"akTlsFpV2"`
+	AKTLSFPv3       string         `json:"akTlsFpV3"`
 	RequestHeaders  HeaderLines    `json:"requestHeaders"`
 	RequestID       string         `json:"requestId"`
 	ResponseHeaders HeaderLines    `json:"responseHeaders"`
@@ -310,9 +314,9 @@ func buildRequest(msg HTTPMessage) string {
 }
 
 func escapeCEFValue(val string) string {
-        escaped := strings.ReplaceAll(val, "|", "\\|")
-        escaped = strings.ReplaceAll(escaped, "=", "\\=")
-        return escaped
+	escaped := strings.ReplaceAll(val, "|", "\\|")
+	escaped = strings.ReplaceAll(escaped, "=", "\\=")
+	return escaped
 }
 
 func deriveSeverity(action string, rec SIEMRecord) int {
@@ -499,6 +503,9 @@ func appendRuleExtensions(builder *cefBuilder, rec SIEMRecord) {
 	if len(rec.AttackData.RuleTags) > 0 {
 		builder.add("AkamaiSiemRuleTags", strings.Join(rec.AttackData.RuleTags, "/"))
 	}
+	if len(rec.AttackData.RuleActions) > 0 {
+		builder.add("AkamaiSiemRuleActions", strings.Join(rec.AttackData.RuleActions, "/"))
+	}
 }
 
 func appendContextExtensions(builder *cefBuilder, rec SIEMRecord) {
@@ -508,12 +515,16 @@ func appendContextExtensions(builder *cefBuilder, rec SIEMRecord) {
 	if res := formatHeaderLines(rec.HTTPMessage.ResponseHeaders); res != "" {
 		builder.add("AkamaiSiemResponseHeaders", res)
 	}
+	builder.add("AkamaiSiemTLSVersion", rec.HTTPMessage.TLSVersion)
 	builder.add("AkamaiSiemResponseStatus", rec.HTTPMessage.Status)
 	builder.add("AkamaiSiemContinent", rec.Geo.Continent)
 	builder.add("AkamaiSiemCountry", rec.Geo.Country)
 	builder.add("AkamaiSiemCity", rec.Geo.City)
 	builder.add("AkamaiSiemRegion", rec.Geo.RegionCode)
 	builder.add("AkamaiSiemASN", rec.Geo.ASN)
+	builder.add("AkamaiSiemJA4", rec.HTTPMessage.JA4)
+	builder.add("AkamaiSiemAKTLSFPv2", rec.HTTPMessage.AKTLSFPv2)
+	builder.add("AkamaiSiemAKTLSFPv3", rec.HTTPMessage.AKTLSFPv3)
 }
 
 func formatHeaderLines(lines []string) string {
@@ -541,7 +552,7 @@ func formatHeaderLines(lines []string) string {
 		}
 	}
 
-        return strings.Join(formatted, "\\n")
+	return strings.Join(formatted, "\\n")
 }
 
 func newSocketConn(target string) (net.Conn, error) {
