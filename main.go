@@ -4,11 +4,15 @@ import (
 	"bufio"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -24,12 +28,25 @@ type Options struct {
 	Limit           int           `long:"limit" description:"The approximate maximum number of security events each fetch returns" default:"10000"`
 	Follow          bool          `short:"f" long:"follow" description:"Continue retrieving messages"`
 	Interval        time.Duration `short:"i" long:"interval" description:"Interval of message retrieval" default:"5m"`
+	Format          string        `long:"format" description:"Output format (json or cef)" default:"cef"`
+	Target          string        `long:"target" description:"Output target URL over TCP/UDP (e.g., tcp://127.0.0.1:514 or udp://127.0.0.1:514)"`
 	EdgeGridFile    string        `short:"r" long:"file" description:"Location of EdgeGrid file" default:"~/.edgerc"`
 	EdgeGridSection string        `short:"s" long:"section" description:"Section of EdgeGrid file" default:"default"`
 	Host            string        `long:"host" env:"EDGEGRID_HOST" description:"EdgeGrid Host"`
 	ClientToken     string        `long:"client-token" env:"EDGEGRID_CLIENT_TOKEN" description:"EdgeGrid ClientToken"`
 	ClientSecret    string        `long:"client-secret" env:"EDGEGRID_CLIENT_SECRET" description:"EdgeGrid ClientSecret"`
 	AccessToken     string        `long:"access-token" env:"EDGEGRID_ACCESS_TOKEN" description:"EdgeGrid AccessToken"`
+}
+
+func (o *Options) normalize() {
+	o.Format = strings.ToLower(o.Format)
+}
+
+func (o *Options) validate() error {
+	if o.Format != "json" && o.Format != "cef" {
+		return fmt.Errorf("unsupported output format: %s", o.Format)
+	}
+	return nil
 }
 
 type SIEMRecord struct {
@@ -39,12 +56,14 @@ type SIEMRecord struct {
 	Format       string       `json:"format"`
 	Geo          Geo          `json:"geo"`
 	HTTPMessage  HTTPMessage  `json:"httpMessage"`
+	Identity     Identity     `json:"identity"`
 	Type         string       `json:"type"`
 	UserRiskData UserRiskData `json:"userRiskData"`
 	Version      string       `json:"version"`
 }
 
 type AttackData struct {
+	AppliedAction string      `json:"appliedAction"`
 	ClientIP      string      `json:"clientIP"`
 	ConfigID      string      `json:"configId"`
 	PolicyID      string      `json:"policyId"`
@@ -85,11 +104,22 @@ type HTTPMessage struct {
 	Port            string         `json:"port"`
 	Protocol        string         `json:"protocol"`
 	Query           RawQueryString `json:"query"`
+	TLS             string         `json:"tls"`
+	TLSVersion      string         `json:"tlsVersion"`
+	JA4             string         `json:"ja4"`
+	AKTLSFPv2       string         `json:"akTlsFpV2"`
+	AKTLSFPv3       string         `json:"akTlsFpV3"`
 	RequestHeaders  HeaderLines    `json:"requestHeaders"`
 	RequestID       string         `json:"requestId"`
 	ResponseHeaders HeaderLines    `json:"responseHeaders"`
 	Start           string         `json:"start"`
 	Status          string         `json:"status"`
+}
+
+type Identity struct {
+	JA4              string `json:"ja4"`
+	TLSFingerprintV2 string `json:"tlsFingerprintV2"`
+	TLSFingerprintV3 string `json:"tlsFingerprintV3"`
 }
 
 type UserRiskData struct {
@@ -213,7 +243,511 @@ func (r RawQueryString) MarshalJSON() ([]byte, error) {
 	return json.Marshal(string(r))
 }
 
-func getSIEMRecords(opts *Options, edgerc *edgegrid.Config) error {
+func buildCEF(rec SIEMRecord) string {
+	actions := rec.AttackData.RuleActions
+	act := firstFromSlice(actions)
+	eventClassID := deriveEventClassID(rec.AttackData.AppliedAction, act)
+	severity := severityFromEventClass(eventClassID)
+	signatureID := firstNonEmpty(eventClassID, rec.AttackData.PolicyID, rec.AttackData.ConfigID, "akamai_siem")
+	eventName := nameFromEventClass(eventClassID)
+
+	builder := newCEFBuilder(cefHeader{
+		DeviceVendor:  "Akamai",
+		DeviceProduct: firstNonEmpty(rec.Type, "akamai_siem"),
+		DeviceVersion: firstNonEmpty(rec.Version, "1.0"),
+		SignatureID:   signatureID,
+		Name:          eventName,
+		Severity:      severity,
+	})
+
+	builder.add("act", act)
+	builder.add("app", normalizedProtocol(rec.HTTPMessage.Protocol))
+	appendSourceExtensions(&builder, rec.AttackData.ClientIP)
+	appendDestinationExtensions(&builder, rec.HTTPMessage)
+	builder.add("requestMethod", rec.HTTPMessage.Method)
+	if req := buildRequest(rec.HTTPMessage); req != "" {
+		builder.add("request", req)
+	}
+	if start, ok := parseStartTime(rec.HTTPMessage.Start); ok {
+		builder.addInt64("start", start.Unix())
+	}
+
+	appendRuleExtensions(&builder, rec)
+	appendContextExtensions(&builder, rec)
+
+	return builder.String()
+}
+
+func parseStartTime(raw string) (time.Time, bool) {
+	if raw == "" {
+		return time.Time{}, false
+	}
+
+	start, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+
+	return time.Unix(start, 0), true
+}
+
+func buildRequest(msg HTTPMessage) string {
+	if msg.Method == "" && msg.Path == "" && msg.Query == "" && msg.Host == "" {
+		return ""
+	}
+
+	path := msg.Path
+	if path == "" {
+		path = "/"
+	}
+	if msg.Query != "" {
+		path = fmt.Sprintf("%s?%s", path, msg.Query)
+	}
+
+	scheme := "http"
+	if firstNonEmpty(msg.TLSVersion, msg.TLS) != "" {
+		scheme = "https"
+	}
+
+	if msg.Host != "" {
+		return fmt.Sprintf("%s://%s%s", scheme, msg.Host, path)
+	}
+
+	return path
+}
+
+func escapeCEFValue(val string) string {
+	escaped := strings.ReplaceAll(val, "|", "\\|")
+	escaped = strings.ReplaceAll(escaped, "=", "\\=")
+	return escaped
+}
+
+func deriveEventClassID(appliedAction, fallback string) string {
+	action := strings.ToLower(appliedAction)
+	if action == "" {
+		action = strings.ToLower(fallback)
+	}
+
+	if action == "alert" || action == "monitor" {
+		return "detect"
+	}
+	if action == "" {
+		return "mitigate"
+	}
+	return "mitigate"
+}
+
+func severityFromEventClass(eventClassID string) int {
+	if strings.ToLower(eventClassID) == "detect" {
+		return 5
+	}
+	return 10
+}
+
+func nameFromEventClass(eventClassID string) string {
+	if strings.ToLower(eventClassID) == "detect" {
+		return "Activity detected"
+	}
+	return "Activity mitigated"
+}
+
+func firstFromSlice(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}
+
+func lastFromSlice(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[len(values)-1]
+}
+
+func scoreToSeverity(score string) (int, bool) {
+	if score == "" {
+		return 0, false
+	}
+
+	val, err := strconv.Atoi(score)
+	if err != nil {
+		return 0, false
+	}
+
+	if val < 0 {
+		val = 0
+	}
+	if val > 100 {
+		val = 100
+	}
+
+	return val / 10, true
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+type cefHeader struct {
+	DeviceVendor  string
+	DeviceProduct string
+	DeviceVersion string
+	SignatureID   string
+	Name          string
+	Severity      int
+}
+
+type cefBuilder struct {
+	header     cefHeader
+	extensions []string
+}
+
+func newCEFBuilder(header cefHeader) cefBuilder {
+	return cefBuilder{header: header}
+}
+
+func (b *cefBuilder) add(key, value string) {
+	if value == "" {
+		return
+	}
+	b.extensions = append(b.extensions, fmt.Sprintf("%s=%s", key, escapeCEFValue(value)))
+}
+
+func (b *cefBuilder) addInt64(key string, value int64) {
+	b.add(key, strconv.FormatInt(value, 10))
+}
+
+func (b *cefBuilder) addLabeled(labelKey, labelValue, key, value string) {
+	if value == "" {
+		if labelValue != "" {
+			b.extensions = append(b.extensions, fmt.Sprintf("%s=%s", labelKey, escapeCEFValue(labelValue)))
+		}
+		return
+	}
+	if labelValue != "" {
+		b.add(labelKey, labelValue)
+	}
+	b.add(key, value)
+}
+
+func (b *cefBuilder) String() string {
+	header := fmt.Sprintf(
+		"CEF:0|%s|%s|%s|%s|%s|%d|",
+		escapeCEFValue(b.header.DeviceVendor),
+		escapeCEFValue(b.header.DeviceProduct),
+		escapeCEFValue(b.header.DeviceVersion),
+		escapeCEFValue(b.header.SignatureID),
+		escapeCEFValue(b.header.Name),
+		b.header.Severity,
+	)
+
+	return header + strings.Join(b.extensions, " ")
+}
+
+func normalizedProtocol(protocol string) string {
+	protocol = strings.TrimSpace(protocol)
+	if protocol == "" {
+		return ""
+	}
+	return strings.ToLower(protocol)
+}
+
+func appendSourceExtensions(builder *cefBuilder, clientIP string) {
+	if clientIP == "" {
+		return
+	}
+
+	if strings.Contains(clientIP, ":") {
+		builder.add("c6a2Label", "Source IPv6 Address")
+	}
+	builder.add("src", clientIP)
+}
+
+func appendDestinationExtensions(builder *cefBuilder, msg HTTPMessage) {
+	if msg.Host != "" {
+		builder.add("dhost", msg.Host)
+	}
+	builder.add("dpt", msg.Port)
+}
+
+func appendRuleExtensions(builder *cefBuilder, rec SIEMRecord) {
+	msg := strings.Join(rec.AttackData.RuleMessages, "; ")
+	cs1 := strings.Join(rec.AttackData.Rules, ";")
+	cs2 := msg
+	cs3 := strings.Join(rec.AttackData.RuleData, "; ")
+	cs4 := strings.Join(rec.AttackData.RuleSelectors, "; ")
+	cs5 := rec.UserRiskData.Risk
+	cs6 := rec.HTTPMessage.RequestID
+
+	builder.addLabeled("cs1Label", "Rules", "cs1", cs1)
+	builder.addLabeled("cs2Label", "Rule Messages", "cs2", cs2)
+	builder.addLabeled("cs3Label", "Rule Data", "cs3", cs3)
+	builder.addLabeled("cs4Label", "Rule Selectors", "cs4", cs4)
+	builder.addLabeled("cs5Label", "Client Reputation", "cs5", cs5)
+	builder.addLabeled("cs6Label", "API ID", "cs6", cs6)
+	builder.add("devicePayloadId", rec.HTTPMessage.RequestID)
+	builder.addLabeled("flexString1Label", "Security Config Id", "flexString1", rec.AttackData.ConfigID)
+	builder.addLabeled("flexString2Label", "Firewall Policy Id", "flexString2", rec.AttackData.PolicyID)
+	builder.add("out", rec.HTTPMessage.Bytes)
+
+	if len(rec.AttackData.RuleTags) > 0 {
+		builder.add("AkamaiSiemRuleTags", strings.Join(rec.AttackData.RuleTags, "/"))
+	}
+	if len(rec.AttackData.RuleActions) > 0 {
+		builder.add("AkamaiSiemRuleActions", strings.Join(rec.AttackData.RuleActions, "/"))
+	}
+}
+
+func appendContextExtensions(builder *cefBuilder, rec SIEMRecord) {
+	if req := formatHeaderLines(rec.HTTPMessage.RequestHeaders); req != "" {
+		builder.add("AkamaiSiemRequestHeaders", req)
+	}
+	if res := formatHeaderLines(rec.HTTPMessage.ResponseHeaders); res != "" {
+		builder.add("AkamaiSiemResponseHeaders", res)
+	}
+	builder.add("AkamaiSiemTLSVersion", firstNonEmpty(rec.HTTPMessage.TLSVersion, rec.HTTPMessage.TLS))
+	builder.add("AkamaiSiemResponseStatus", rec.HTTPMessage.Status)
+	builder.add("AkamaiSiemContinent", rec.Geo.Continent)
+	builder.add("AkamaiSiemCountry", rec.Geo.Country)
+	builder.add("AkamaiSiemCity", rec.Geo.City)
+	builder.add("AkamaiSiemRegion", rec.Geo.RegionCode)
+	builder.add("AkamaiSiemASN", rec.Geo.ASN)
+	builder.add("AkamaiSiemJA4", firstNonEmpty(rec.Identity.JA4, rec.HTTPMessage.JA4))
+	builder.add("AkamaiSiemAKTLSFPv2", firstNonEmpty(rec.Identity.TLSFingerprintV2, rec.HTTPMessage.AKTLSFPv2))
+	builder.add("AkamaiSiemAKTLSFPv3", firstNonEmpty(rec.Identity.TLSFingerprintV3, rec.HTTPMessage.AKTLSFPv3))
+}
+
+func formatHeaderLines(lines []string) string {
+	formatted := make([]string, 0, len(lines))
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+
+		key := line
+		val := ""
+		if idx := strings.Index(line, ":"); idx >= 0 {
+			key = strings.TrimSpace(line[:idx])
+			val = strings.TrimSpace(line[idx+1:])
+		}
+
+		val = strings.ReplaceAll(val, "\t", " ")
+		val = strings.ReplaceAll(val, " ", "+")
+
+		if val != "" {
+			formatted = append(formatted, fmt.Sprintf("%s:+%s", key, val))
+		} else {
+			formatted = append(formatted, key)
+		}
+	}
+
+	return strings.Join(formatted, "\n")
+}
+
+type socketTarget struct {
+	network string
+	address string
+}
+
+func parseSocketTarget(target string) (*socketTarget, error) {
+	if target == "" {
+		return nil, nil
+	}
+
+	u, err := url.Parse(target)
+	if err != nil {
+		return nil, err
+	}
+
+	network := strings.ToLower(u.Scheme)
+	if network != "tcp" && network != "udp" {
+		return nil, fmt.Errorf("unsupported target scheme: %s", u.Scheme)
+	}
+
+	host := u.Host
+	if host == "" {
+		return nil, fmt.Errorf("target missing host")
+	}
+
+	if _, _, err := net.SplitHostPort(host); err != nil {
+		host = net.JoinHostPort(host, "514")
+	}
+
+	return &socketTarget{network: network, address: host}, nil
+}
+
+func (t *socketTarget) dial() (net.Conn, error) {
+	if t == nil {
+		return nil, nil
+	}
+	return net.Dial(t.network, t.address)
+}
+
+type recordSink struct {
+	format  string
+	target  *socketTarget
+	conn    net.Conn
+	writer  io.Writer
+	encoder *json.Encoder
+}
+
+func newRecordSink(format string, target *socketTarget) *recordSink {
+	sink := &recordSink{format: format, target: target}
+	sink.setWriter(os.Stdout)
+	return sink
+}
+
+func (s *recordSink) setWriter(w io.Writer) {
+	s.writer = w
+	s.encoder = json.NewEncoder(w)
+	s.encoder.SetEscapeHTML(false)
+}
+
+func (s *recordSink) ensureConn() error {
+	if s.target == nil {
+		if s.writer == nil {
+			s.setWriter(os.Stdout)
+		}
+		return nil
+	}
+
+	if s.conn != nil {
+		return nil
+	}
+
+	conn, err := s.target.dial()
+	if err != nil {
+		return err
+	}
+
+	s.conn = conn
+	s.setWriter(conn)
+	return nil
+}
+
+func (s *recordSink) closeConn() {
+	if s.conn != nil {
+		s.conn.Close()
+		s.conn = nil
+	}
+}
+
+func (s *recordSink) Close() {
+	s.closeConn()
+}
+
+func (s *recordSink) writeWithReconnect(fn func(io.Writer) error) {
+	if err := s.ensureConn(); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to establish connection: %v\n", err)
+		return
+	}
+
+	if err := fn(s.writer); err != nil {
+		if s.target != nil && isRecoverableConnErr(err) {
+			fmt.Fprintf(os.Stderr, "connection lost, reconnecting: %v\n", err)
+			s.closeConn()
+			if err := s.ensureConn(); err == nil {
+				if err := fn(s.writer); err == nil {
+					return
+				}
+			}
+		}
+
+		fmt.Fprintf(os.Stderr, "failed to send message: %v\n", err)
+	}
+}
+
+func (s *recordSink) EmitRecord(rec SIEMRecord) {
+	if s.format == "cef" {
+		cef := buildCEF(rec)
+		s.writeWithReconnect(func(w io.Writer) error {
+			_, err := fmt.Fprintf(w, "%s\n", cef)
+			return err
+		})
+		return
+	}
+
+	s.writeWithReconnect(func(w io.Writer) error {
+		if s.encoder == nil || s.writer != w {
+			s.setWriter(w)
+		}
+		return s.encoder.Encode(rec)
+	})
+}
+
+func (s *recordSink) EmitMetadata(mdt SIEMMetadata) {
+	s.writeWithReconnect(func(w io.Writer) error {
+		if s.encoder == nil || s.writer != w {
+			s.setWriter(w)
+		}
+		return s.encoder.Encode(mdt)
+	})
+}
+
+func isRecoverableConnErr(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	if errors.Is(err, io.ErrClosedPipe) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED) {
+		return true
+	}
+
+	if opErr, ok := err.(*net.OpError); ok {
+		if errors.Is(opErr.Err, syscall.EPIPE) || errors.Is(opErr.Err, syscall.ECONNRESET) || errors.Is(opErr.Err, syscall.ECONNABORTED) {
+			return true
+		}
+	}
+
+	return strings.Contains(strings.ToLower(err.Error()), "broken pipe")
+}
+
+func loadEdgeGridConfig(opts Options) (*edgegrid.Config, error) {
+	egpath, err := homedir.Expand(opts.EdgeGridFile)
+	if err != nil {
+		return nil, err
+	}
+
+	var edgerc *edgegrid.Config
+	if _, err := os.Stat(egpath); err == nil {
+		edgerc, err = edgegrid.New(
+			edgegrid.WithFile(egpath),
+			edgegrid.WithSection(opts.EdgeGridSection),
+		)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		edgerc, _ = edgegrid.New()
+		if opts.Host != "" {
+			edgerc.Host = opts.Host
+		}
+		if opts.ClientToken != "" {
+			edgerc.ClientToken = opts.ClientToken
+		}
+		if opts.ClientSecret != "" {
+			edgerc.ClientSecret = opts.ClientSecret
+		}
+		if opts.AccessToken != "" {
+			edgerc.AccessToken = opts.AccessToken
+		}
+	}
+
+	if edgerc.Host == "" || edgerc.ClientToken == "" || edgerc.ClientSecret == "" || edgerc.AccessToken == "" {
+		return nil, fmt.Errorf("failed to load edgegrid configuration")
+	}
+
+	return edgerc, nil
+}
+
+func getSIEMRecords(opts *Options, edgerc *edgegrid.Config, sink *recordSink) error {
 	q := url.Values{}
 	q.Add("offset", opts.Offset)
 	q.Add("limit", fmt.Sprintf("%d", opts.Limit))
@@ -239,38 +773,30 @@ func getSIEMRecords(opts *Options, edgerc *edgegrid.Config) error {
 		return err
 	}
 	defer res.Body.Close()
-
 	if res.StatusCode != http.StatusOK {
 		return fmt.Errorf("received %d %s\n", res.StatusCode, res.Status)
 	}
 
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "")
-	enc.SetEscapeHTML(false)
+	scanner := bufio.NewScanner(res.Body)
+	for scanner.Scan() {
+		line := scanner.Bytes()
 
-	sc := bufio.NewScanner(res.Body)
-	for sc.Scan() {
 		var rec SIEMRecord
+		if err := json.Unmarshal(line, &rec); err == nil && rec.Type == "akamai_siem" {
+			sink.EmitRecord(rec)
+			continue
+		}
+
 		var mdt SIEMMetadata
-
-		line := sc.Bytes()
-		if err := json.Unmarshal(line, &rec); err != nil {
-			continue
-		}
-
-		if rec.Type == "akamai_siem" {
-			enc.Encode(rec)
-			continue
-		}
-
 		if err := json.Unmarshal(line, &mdt); err != nil {
 			continue
 		}
 
 		opts.Offset = mdt.Offset
-		enc.Encode(mdt)
+		sink.EmitMetadata(mdt)
 	}
-	if err := sc.Err(); err != nil {
+
+	if err := scanner.Err(); err != nil {
 		return err
 	}
 
@@ -279,48 +805,37 @@ func getSIEMRecords(opts *Options, edgerc *edgegrid.Config) error {
 
 func run() error {
 	var opts Options
-	_, err := flags.Parse(&opts)
-	if err != nil {
+	if _, err := flags.Parse(&opts); err != nil {
 		if fe, ok := err.(*flags.Error); ok && fe.Type == flags.ErrHelp {
 			os.Exit(0)
 		}
 		os.Exit(1)
 	}
 
-	egpath, err := homedir.Expand(opts.EdgeGridFile)
+	opts.normalize()
+	if err := opts.validate(); err != nil {
+		return err
+	}
+
+	target, err := parseSocketTarget(opts.Target)
 	if err != nil {
 		return err
 	}
 
-	var edgerc *edgegrid.Config
-	if _, err := os.Stat(egpath); err == nil {
-		edgerc, err = edgegrid.New(
-			edgegrid.WithFile(egpath),
-			edgegrid.WithSection(opts.EdgeGridSection),
-		)
-		if err != nil {
+	sink := newRecordSink(opts.Format, target)
+	defer sink.Close()
+	if target != nil {
+		if err := sink.ensureConn(); err != nil {
 			return err
 		}
-	} else {
-		edgerc, _ = edgegrid.New()
-		if opts.Host != "" {
-			edgerc.Host = opts.Host
-		}
-		if opts.ClientToken != "" {
-			edgerc.ClientToken = opts.ClientToken
-		}
-		if opts.ClientSecret != "" {
-			edgerc.ClientSecret = opts.ClientSecret
-		}
-		if opts.AccessToken != "" {
-			edgerc.AccessToken = opts.AccessToken
-		}
-	}
-	if edgerc.Host == "" || edgerc.ClientToken == "" || edgerc.ClientSecret == "" || edgerc.AccessToken == "" {
-		return fmt.Errorf("failed to load edgegrid configuration")
 	}
 
-	if err := getSIEMRecords(&opts, edgerc); err != nil {
+	edgerc, err := loadEdgeGridConfig(opts)
+	if err != nil {
+		return err
+	}
+
+	if err := getSIEMRecords(&opts, edgerc, sink); err != nil {
 		return err
 	}
 	if !opts.Follow {
@@ -336,7 +851,7 @@ func run() error {
 	for {
 		select {
 		case <-ticker.C:
-			if err := getSIEMRecords(&opts, edgerc); err != nil {
+			if err := getSIEMRecords(&opts, edgerc, sink); err != nil {
 				return err
 			}
 		case <-sigChan:
