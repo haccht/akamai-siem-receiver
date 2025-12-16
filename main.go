@@ -667,6 +667,7 @@ func (s *recordSink) writeWithReconnect(fn func(io.Writer) error) {
 func (s *recordSink) EmitRecord(rec SIEMRecord) {
 	if s.format == "cef" {
 		cef := buildCEF(rec)
+
 		s.writeWithReconnect(func(w io.Writer) error {
 			_, err := fmt.Fprintf(w, "%s\n", cef)
 			return err
@@ -793,7 +794,7 @@ func getSIEMRecords(opts *Options, edgerc *edgegrid.Config, sink *recordSink) er
 		}
 
 		opts.Offset = mdt.Offset
-		sink.EmitMetadata(mdt)
+		//sink.EmitMetadata(mdt)
 	}
 
 	if err := scanner.Err(); err != nil {
