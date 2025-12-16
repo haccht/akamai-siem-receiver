@@ -542,7 +542,7 @@ func formatHeaderLines(lines []string) string {
 		}
 	}
 
-	return strings.Join(formatted, "\n")
+        return strings.Join(formatted, "\\n")
 }
 
 func newSocketConn(target string) (net.Conn, error) {
