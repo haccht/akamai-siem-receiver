@@ -55,12 +55,14 @@ type SIEMRecord struct {
 	Format       string       `json:"format"`
 	Geo          Geo          `json:"geo"`
 	HTTPMessage  HTTPMessage  `json:"httpMessage"`
+	Identity     Identity     `json:"identity"`
 	Type         string       `json:"type"`
 	UserRiskData UserRiskData `json:"userRiskData"`
 	Version      string       `json:"version"`
 }
 
 type AttackData struct {
+	AppliedAction string      `json:"appliedAction"`
 	ClientIP      string      `json:"clientIP"`
 	ConfigID      string      `json:"configId"`
 	PolicyID      string      `json:"policyId"`
@@ -110,6 +112,12 @@ type HTTPMessage struct {
 	ResponseHeaders HeaderLines    `json:"responseHeaders"`
 	Start           string         `json:"start"`
 	Status          string         `json:"status"`
+}
+
+type Identity struct {
+	JA4              string `json:"ja4"`
+	TLSFingerprintV2 string `json:"tlsFingerprintV2"`
+	TLSFingerprintV3 string `json:"tlsFingerprintV3"`
 }
 
 type UserRiskData struct {
@@ -236,13 +244,10 @@ func (r RawQueryString) MarshalJSON() ([]byte, error) {
 func buildCEF(rec SIEMRecord) string {
 	actions := rec.AttackData.RuleActions
 	act := firstFromSlice(actions)
-	signatureAction := lastFromSlice(actions)
-	severity := deriveSeverity(signatureAction, rec)
-	signatureID := firstNonEmpty(signatureAction, rec.AttackData.PolicyID, rec.AttackData.ConfigID, "akamai_siem")
-	eventName := eventNameFromAction(signatureAction)
-	if eventName == "" {
-		eventName = firstNonEmpty(firstFromSlice(rec.AttackData.RuleMessages), "akamai_siem event")
-	}
+	eventClassID := deriveEventClassID(rec.AttackData.AppliedAction, act)
+	severity := severityFromEventClass(eventClassID)
+	signatureID := firstNonEmpty(eventClassID, rec.AttackData.PolicyID, rec.AttackData.ConfigID, "akamai_siem")
+	eventName := nameFromEventClass(eventClassID)
 
 	builder := newCEFBuilder(cefHeader{
 		DeviceVendor:  "Akamai",
@@ -297,20 +302,16 @@ func buildRequest(msg HTTPMessage) string {
 		path = fmt.Sprintf("%s?%s", path, msg.Query)
 	}
 
-	request := path
-	if msg.Host != "" {
-		scheme := "http"
-		if msg.Port == "443" || strings.HasSuffix(strings.ToLower(msg.Protocol), "https") {
-			scheme = "https"
-		}
-		if msg.Port != "" && msg.Port != "80" && msg.Port != "443" {
-			request = fmt.Sprintf("%s://%s:%s%s", scheme, msg.Host, msg.Port, path)
-		} else {
-			request = fmt.Sprintf("%s://%s%s", scheme, msg.Host, path)
-		}
+	scheme := "http"
+	if msg.TLSVersion != "" {
+		scheme = "https"
 	}
 
-	return request
+	if msg.Host != "" {
+		return fmt.Sprintf("%s://%s%s", scheme, msg.Host, path)
+	}
+
+	return path
 }
 
 func escapeCEFValue(val string) string {
@@ -319,40 +320,33 @@ func escapeCEFValue(val string) string {
 	return escaped
 }
 
-func deriveSeverity(action string, rec SIEMRecord) int {
-	switch strings.ToLower(action) {
-	case "mitigate":
-		return 10
-	case "deny":
-		return 5
-	case "alert":
-		return 3
-	case "monitor":
-		return 2
+func deriveEventClassID(appliedAction, fallback string) string {
+	action := strings.ToLower(appliedAction)
+	if action == "" {
+		action = strings.ToLower(fallback)
 	}
 
-	if sev, ok := scoreToSeverity(rec.UserRiskData.Score); ok {
-		return sev
+	if action == "alert" || action == "monitor" {
+		return "detect"
 	}
-	if sev, ok := scoreToSeverity(rec.BotData.BotScore); ok {
-		return sev
+	if action == "" {
+		return "mitigate"
 	}
-	return 5
+	return "mitigate"
 }
 
-func eventNameFromAction(action string) string {
-	switch strings.ToLower(action) {
-	case "mitigate":
-		return "Activity mitigated"
-	case "deny":
-		return "Activity denied"
-	case "alert":
-		return "Activity alerted"
-	case "monitor":
-		return "Activity monitored"
-	default:
-		return ""
+func severityFromEventClass(eventClassID string) int {
+	if strings.ToLower(eventClassID) == "detect" {
+		return 5
 	}
+	return 10
+}
+
+func nameFromEventClass(eventClassID string) string {
+	if strings.ToLower(eventClassID) == "detect" {
+		return "Activity detected"
+	}
+	return "Activity mitigated"
 }
 
 func firstFromSlice(values []string) string {
@@ -522,9 +516,9 @@ func appendContextExtensions(builder *cefBuilder, rec SIEMRecord) {
 	builder.add("AkamaiSiemCity", rec.Geo.City)
 	builder.add("AkamaiSiemRegion", rec.Geo.RegionCode)
 	builder.add("AkamaiSiemASN", rec.Geo.ASN)
-	builder.add("AkamaiSiemJA4", rec.HTTPMessage.JA4)
-	builder.add("AkamaiSiemAKTLSFPv2", rec.HTTPMessage.AKTLSFPv2)
-	builder.add("AkamaiSiemAKTLSFPv3", rec.HTTPMessage.AKTLSFPv3)
+	builder.add("AkamaiSiemJA4", firstNonEmpty(rec.Identity.JA4, rec.HTTPMessage.JA4))
+	builder.add("AkamaiSiemAKTLSFPv2", firstNonEmpty(rec.Identity.TLSFingerprintV2, rec.HTTPMessage.AKTLSFPv2))
+	builder.add("AkamaiSiemAKTLSFPv3", firstNonEmpty(rec.Identity.TLSFingerprintV3, rec.HTTPMessage.AKTLSFPv3))
 }
 
 func formatHeaderLines(lines []string) string {
@@ -552,7 +546,7 @@ func formatHeaderLines(lines []string) string {
 		}
 	}
 
-	return strings.Join(formatted, "\\n")
+	return strings.Join(formatted, "\n")
 }
 
 func newSocketConn(target string) (net.Conn, error) {
