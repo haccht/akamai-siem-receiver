@@ -503,11 +503,11 @@ func appendRuleExtensions(builder *cefBuilder, rec SIEMRecord) {
 }
 
 func appendContextExtensions(builder *cefBuilder, rec SIEMRecord) {
-	if len(rec.HTTPMessage.RequestHeaders) > 0 {
-		builder.add("AkamaiSiemRequestHeaders", strings.Join(rec.HTTPMessage.RequestHeaders, "\n"))
+	if req := formatHeaderLines(rec.HTTPMessage.RequestHeaders); req != "" {
+		builder.add("AkamaiSiemRequestHeaders", req)
 	}
-	if len(rec.HTTPMessage.ResponseHeaders) > 0 {
-		builder.add("AkamaiSiemResponseHeaders", strings.Join(rec.HTTPMessage.ResponseHeaders, "\n"))
+	if res := formatHeaderLines(rec.HTTPMessage.ResponseHeaders); res != "" {
+		builder.add("AkamaiSiemResponseHeaders", res)
 	}
 	builder.add("AkamaiSiemResponseStatus", rec.HTTPMessage.Status)
 	builder.add("AkamaiSiemContinent", rec.Geo.Continent)
@@ -515,6 +515,34 @@ func appendContextExtensions(builder *cefBuilder, rec SIEMRecord) {
 	builder.add("AkamaiSiemCity", rec.Geo.City)
 	builder.add("AkamaiSiemRegion", rec.Geo.RegionCode)
 	builder.add("AkamaiSiemASN", rec.Geo.ASN)
+}
+
+func formatHeaderLines(lines []string) string {
+	formatted := make([]string, 0, len(lines))
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+
+		key := line
+		val := ""
+		if idx := strings.Index(line, ":"); idx >= 0 {
+			key = strings.TrimSpace(line[:idx])
+			val = strings.TrimSpace(line[idx+1:])
+		}
+
+		val = strings.ReplaceAll(val, "\t", " ")
+		val = strings.ReplaceAll(val, " ", "+")
+
+		if val != "" {
+			formatted = append(formatted, fmt.Sprintf("%s:+%s", key, val))
+		} else {
+			formatted = append(formatted, key)
+		}
+	}
+
+	return strings.Join(formatted, "\n")
 }
 
 func newSocketConn(target string) (net.Conn, error) {
