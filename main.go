@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -27,7 +28,7 @@ type Options struct {
 	Follow          bool          `short:"f" long:"follow" description:"Continue retrieving messages"`
 	Interval        time.Duration `short:"i" long:"interval" description:"Interval of message retrieval" default:"5m"`
 	Format          string        `long:"format" description:"Output format (json or cef)" default:"cef"`
-	Syslog          string        `long:"syslog" description:"CEF target URL over TCP/UDP (e.g., tcp://127.0.0.1:514 or udp://127.0.0.1:514)"`
+	Target          string        `long:"target" description:"Output target URL over TCP/UDP (e.g., tcp://127.0.0.1:514 or udp://127.0.0.1:514)"`
 	EdgeGridFile    string        `short:"r" long:"file" description:"Location of EdgeGrid file" default:"~/.edgerc"`
 	EdgeGridSection string        `short:"s" long:"section" description:"Section of EdgeGrid file" default:"default"`
 	Host            string        `long:"host" env:"EDGEGRID_HOST" description:"EdgeGrid Host"`
@@ -43,9 +44,6 @@ func (o *Options) normalize() {
 func (o *Options) validate() error {
 	if o.Format != "json" && o.Format != "cef" {
 		return fmt.Errorf("unsupported output format: %s", o.Format)
-	}
-	if o.Syslog != "" && o.Format != "cef" {
-		return fmt.Errorf("remote socket output requires --format cef")
 	}
 	return nil
 }
@@ -543,16 +541,23 @@ func newSocketConn(target string) (net.Conn, error) {
 type recordSink struct {
 	format  string
 	conn    net.Conn
+	writer  io.Writer
 	encoder *json.Encoder
 }
 
 func newRecordSink(format string, conn net.Conn) *recordSink {
-	enc := json.NewEncoder(os.Stdout)
+	writer := io.Writer(os.Stdout)
+	if conn != nil {
+		writer = conn
+	}
+
+	enc := json.NewEncoder(writer)
 	enc.SetEscapeHTML(false)
 
 	return &recordSink{
 		format:  format,
 		conn:    conn,
+		writer:  writer,
 		encoder: enc,
 	}
 }
@@ -560,13 +565,9 @@ func newRecordSink(format string, conn net.Conn) *recordSink {
 func (s *recordSink) EmitRecord(rec SIEMRecord) {
 	if s.format == "cef" {
 		cef := buildCEF(rec)
-		if s.conn != nil {
-			if _, err := fmt.Fprintf(s.conn, "%s\n", cef); err != nil {
-				fmt.Fprintf(os.Stderr, "failed to send message: %v\n", err)
-			}
-			return
+		if _, err := fmt.Fprintf(s.writer, "%s\n", cef); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to send message: %v\n", err)
 		}
-		fmt.Fprintln(os.Stdout, cef)
 		return
 	}
 
@@ -685,7 +686,7 @@ func run() error {
 		return err
 	}
 
-	conn, err := newSocketConn(opts.Syslog)
+	conn, err := newSocketConn(opts.Target)
 	if err != nil {
 		return err
 	}
