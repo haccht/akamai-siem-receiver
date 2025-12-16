@@ -50,7 +50,7 @@ $ akamai-siem-receiver --config 100000 --format cef
 CEF:0|Akamai|SIEM Receiver|1.0|qik1_26545|SQL Injection Attack (SmartDetect)|10 src=192.0.2.82 dst=www.hmapi.com dpt=443 requestMethod=POST request=POST /?option=com_jce telnet.exe end=1491303422000 msg=Unknown Bots (HTTP Libraries); SQL Injection Attack (SmartDetect); SQL Injection Attack cs1Label=ruleMessages cs1=Unknown Bots (HTTP Libraries); SQL Injection Attack (SmartDetect); SQL Injection Attack cs2Label=ruleTags cs2=AKAMAI/BOT/UNKNOWN_BOT; ASE/WEB_ATTACK/SQLI; ASE/WEB_ATTACK/SQLI
 ```
 
-To forward output directly to a collector over raw TCP/UDP sockets (without wrapping in RFC 3164/5424 syslog envelopes), provide `--target` (supported schemes: `tcp` and `udp`). When omitted, output is written to stdout. Metadata lines follow the selected format (CEF with JSON metadata or all JSON) and are sent to the same target:
+To forward output directly to a collector over raw TCP/UDP sockets (without wrapping in RFC 3164/5424 syslog envelopes), provide `--target` (supported schemes: `tcp` and `udp`). When omitted, output is written to stdout. Metadata lines follow the selected format (CEF with JSON metadata or all JSON) and are sent to the same target. TCP/UDP targets are reconnected automatically on broken pipe/reset errors to continue delivery:
 
 ```
 $ akamai-siem-receiver --config 100000 --target tcp://127.0.0.1:514

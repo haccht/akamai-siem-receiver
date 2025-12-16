@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -547,10 +548,15 @@ func formatHeaderLines(lines []string) string {
 		}
 	}
 
-	return strings.Join(formatted, "\\n")
+	return strings.Join(formatted, "\n")
 }
 
-func newSocketConn(target string) (net.Conn, error) {
+type socketTarget struct {
+	network string
+	address string
+}
+
+func parseSocketTarget(target string) (*socketTarget, error) {
 	if target == "" {
 		return nil, nil
 	}
@@ -574,47 +580,134 @@ func newSocketConn(target string) (net.Conn, error) {
 		host = net.JoinHostPort(host, "514")
 	}
 
-	return net.Dial(network, host)
+	return &socketTarget{network: network, address: host}, nil
+}
+
+func (t *socketTarget) dial() (net.Conn, error) {
+	if t == nil {
+		return nil, nil
+	}
+	return net.Dial(t.network, t.address)
 }
 
 type recordSink struct {
 	format  string
+	target  *socketTarget
 	conn    net.Conn
 	writer  io.Writer
 	encoder *json.Encoder
 }
 
-func newRecordSink(format string, conn net.Conn) *recordSink {
-	writer := io.Writer(os.Stdout)
-	if conn != nil {
-		writer = conn
+func newRecordSink(format string, target *socketTarget) *recordSink {
+	sink := &recordSink{format: format, target: target}
+	sink.setWriter(os.Stdout)
+	return sink
+}
+
+func (s *recordSink) setWriter(w io.Writer) {
+	s.writer = w
+	s.encoder = json.NewEncoder(w)
+	s.encoder.SetEscapeHTML(false)
+}
+
+func (s *recordSink) ensureConn() error {
+	if s.target == nil {
+		if s.writer == nil {
+			s.setWriter(os.Stdout)
+		}
+		return nil
 	}
 
-	enc := json.NewEncoder(writer)
-	enc.SetEscapeHTML(false)
+	if s.conn != nil {
+		return nil
+	}
 
-	return &recordSink{
-		format:  format,
-		conn:    conn,
-		writer:  writer,
-		encoder: enc,
+	conn, err := s.target.dial()
+	if err != nil {
+		return err
+	}
+
+	s.conn = conn
+	s.setWriter(conn)
+	return nil
+}
+
+func (s *recordSink) closeConn() {
+	if s.conn != nil {
+		s.conn.Close()
+		s.conn = nil
+	}
+}
+
+func (s *recordSink) Close() {
+	s.closeConn()
+}
+
+func (s *recordSink) writeWithReconnect(fn func(io.Writer) error) {
+	if err := s.ensureConn(); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to establish connection: %v\n", err)
+		return
+	}
+
+	if err := fn(s.writer); err != nil {
+		if s.target != nil && isRecoverableConnErr(err) {
+			fmt.Fprintf(os.Stderr, "connection lost, reconnecting: %v\n", err)
+			s.closeConn()
+			if err := s.ensureConn(); err == nil {
+				if err := fn(s.writer); err == nil {
+					return
+				}
+			}
+		}
+
+		fmt.Fprintf(os.Stderr, "failed to send message: %v\n", err)
 	}
 }
 
 func (s *recordSink) EmitRecord(rec SIEMRecord) {
 	if s.format == "cef" {
 		cef := buildCEF(rec)
-		if _, err := fmt.Fprintf(s.writer, "%s\n", cef); err != nil {
-			fmt.Fprintf(os.Stderr, "failed to send message: %v\n", err)
-		}
+
+		s.writeWithReconnect(func(w io.Writer) error {
+			_, err := fmt.Fprintf(w, "%s\n", cef)
+			return err
+		})
 		return
 	}
 
-	s.encoder.Encode(rec)
+	s.writeWithReconnect(func(w io.Writer) error {
+		if s.encoder == nil || s.writer != w {
+			s.setWriter(w)
+		}
+		return s.encoder.Encode(rec)
+	})
 }
 
 func (s *recordSink) EmitMetadata(mdt SIEMMetadata) {
-	s.encoder.Encode(mdt)
+	s.writeWithReconnect(func(w io.Writer) error {
+		if s.encoder == nil || s.writer != w {
+			s.setWriter(w)
+		}
+		return s.encoder.Encode(mdt)
+	})
+}
+
+func isRecoverableConnErr(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	if errors.Is(err, io.ErrClosedPipe) || errors.Is(err, syscall.EPIPE) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNABORTED) {
+		return true
+	}
+
+	if opErr, ok := err.(*net.OpError); ok {
+		if errors.Is(opErr.Err, syscall.EPIPE) || errors.Is(opErr.Err, syscall.ECONNRESET) || errors.Is(opErr.Err, syscall.ECONNABORTED) {
+			return true
+		}
+	}
+
+	return strings.Contains(strings.ToLower(err.Error()), "broken pipe")
 }
 
 func loadEdgeGridConfig(opts Options) (*edgegrid.Config, error) {
@@ -725,15 +818,18 @@ func run() error {
 		return err
 	}
 
-	conn, err := newSocketConn(opts.Target)
+	target, err := parseSocketTarget(opts.Target)
 	if err != nil {
 		return err
 	}
-	if conn != nil {
-		defer conn.Close()
-	}
 
-	sink := newRecordSink(opts.Format, conn)
+	sink := newRecordSink(opts.Format, target)
+	defer sink.Close()
+	if target != nil {
+		if err := sink.ensureConn(); err != nil {
+			return err
+		}
+	}
 
 	edgerc, err := loadEdgeGridConfig(opts)
 	if err != nil {
