@@ -310,10 +310,9 @@ func buildRequest(msg HTTPMessage) string {
 }
 
 func escapeCEFValue(val string) string {
-	escaped := strings.ReplaceAll(val, "\\", "\\\\")
-	escaped = strings.ReplaceAll(escaped, "|", "\\|")
-	escaped = strings.ReplaceAll(escaped, "=", "\\=")
-	return escaped
+        escaped := strings.ReplaceAll(val, "|", "\\|")
+        escaped = strings.ReplaceAll(escaped, "=", "\\=")
+        return escaped
 }
 
 func deriveSeverity(action string, rec SIEMRecord) int {
