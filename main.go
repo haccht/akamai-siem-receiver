@@ -701,7 +701,7 @@ func getSIEMRecords(opts *Options, edgerc *edgegrid.Config, sink *recordSink) er
 		}
 
 		opts.Offset = mdt.Offset
-		sink.EmitMetadata(mdt)
+		//sink.EmitMetadata(mdt)
 	}
 
 	if err := scanner.Err(); err != nil {
