@@ -15,6 +15,8 @@ Application Options:
       --limit=         The approximate maximum number of security events each fetch returns (default: 10000)
   -f, --follow         Continue retrieving messages
   -i, --interval=      Interval of message retrieval (default: 5m)
+      --format=        Output format (json or cef) (default: cef)
+      --syslog=        Syslog target URL (e.g., tcp://127.0.0.1:514)
   -r, --file=          Location of EdgeGrid file (default: ~/.edgerc)
   -s, --section=       Section of EdgeGrid file (default: default)
       --host=          EdgeGrid Host [$EDGEGRID_HOST]
@@ -26,7 +28,7 @@ Help Options:
   -h, --help           Show this help message
 ```
 
-Run this tool with the WAF Config ID and you will get the Multi-JSON responses.
+Run this tool with the WAF Config ID and you will get the Multi-JSON responses (use `--format json` to override the default CEF output).
 Each event is listed on its own line, and the last line provides metadata on the whole batch.
 
 ```
@@ -40,6 +42,34 @@ $ akamai-siem-receiver --config 100000 --follow
 {"attackData": {...}, "httpMessage": {...}, ...}
 {"offset": "...", "total": 10000, "limit": 10000}
 ```
+
+When `--format cef` is used (the default), Akamai SIEM records are emitted as CEF while metadata lines (offset/total/limit) remain JSON and the `--follow` behavior is unchanged. Example:
+
+```
+$ akamai-siem-receiver --config 100000 --format cef
+CEF:0|Akamai|SIEM Receiver|1.0|qik1_26545|SQL Injection Attack (SmartDetect)|10 src=192.0.2.82 dst=www.hmapi.com dpt=443 requestMethod=POST request=POST /?option=com_jce telnet.exe end=1491303422000 msg=Unknown Bots (HTTP Libraries); SQL Injection Attack (SmartDetect); SQL Injection Attack cs1Label=ruleMessages cs1=Unknown Bots (HTTP Libraries); SQL Injection Attack (SmartDetect); SQL Injection Attack cs2Label=ruleTags cs2=AKAMAI/BOT/UNKNOWN_BOT; ASE/WEB_ATTACK/SQLI; ASE/WEB_ATTACK/SQLI
+```
+
+To forward CEF messages directly to a syslog collector, provide `--syslog` (supported schemes: `tcp` and `udp`). Metadata records (offset/total/limit) continue to print to stdout as JSON:
+
+```
+$ akamai-siem-receiver --config 100000 --syslog tcp://127.0.0.1:514
+```
+
+CEF field mapping highlights:
+
+- `attackData.clientIP` → `src`
+- `httpMessage.host` → `dst`/`dhost`; `httpMessage.port` → `dpt`
+- `httpMessage.method`/`path`/`query` → `requestMethod`/`request`
+- `attackData.rules` → `cs1` (with `cs1Label=Rules`)
+- `attackData.ruleMessages` → `msg` and `cs2` (with `cs2Label=Rule Messages`)
+- `attackData.ruleData` → `cs3` (with `cs3Label=Rule Data`); `attackData.ruleSelectors` → `cs4` (with `cs4Label=Rule Selectors`)
+- `userRiskData.risk` → `cs5` (with `cs5Label=Client Reputation`); `httpMessage.requestId` → `cs6` (with `cs6Label=API ID` and `devicePayloadId`)
+- `attackData.configId` → `flexString1` (with `flexString1Label=Security Config Id`); `attackData.policyId` → `flexString2` (with `flexString2Label=Firewall Policy Id`)
+- `httpMessage.bytes` → `out`
+- `httpMessage.start` (Unix seconds) → `start` (Unix seconds)
+- `attackData.ruleTags` → `AkamaiSiemRuleTags`; request/response headers and geo fields are passed through with `AkamaiSiem*` prefixes
+- Severity derives from `userRiskData.score` or `botData.botScore`
 
 
 The events are all base64 decrypted. Sample JSON line is as follows.
