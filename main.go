@@ -233,7 +233,7 @@ func buildCEF(rec SIEMRecord) string {
 	actions := rec.AttackData.RuleActions
 	act := firstFromSlice(actions)
 	signatureAction := lastFromSlice(actions)
-	severity := deriveSeverity(rec)
+	severity := deriveSeverity(signatureAction, rec)
 	signatureID := firstNonEmpty(signatureAction, rec.AttackData.PolicyID, rec.AttackData.ConfigID, "akamai_siem")
 	eventName := eventNameFromAction(signatureAction)
 	if eventName == "" {
@@ -259,7 +259,6 @@ func buildCEF(rec SIEMRecord) string {
 	}
 	if start, ok := parseStartTime(rec.HTTPMessage.Start); ok {
 		builder.addInt64("start", start.Unix())
-		builder.addInt64("end", start.UnixMilli())
 	}
 
 	appendRuleExtensions(&builder, rec)
@@ -307,10 +306,6 @@ func buildRequest(msg HTTPMessage) string {
 		}
 	}
 
-	if msg.Method != "" {
-		return strings.TrimSpace(fmt.Sprintf("%s %s", msg.Method, request))
-	}
-
 	return request
 }
 
@@ -321,7 +316,18 @@ func escapeCEFValue(val string) string {
 	return escaped
 }
 
-func deriveSeverity(rec SIEMRecord) int {
+func deriveSeverity(action string, rec SIEMRecord) int {
+	switch strings.ToLower(action) {
+	case "mitigate":
+		return 10
+	case "deny":
+		return 5
+	case "alert":
+		return 3
+	case "monitor":
+		return 2
+	}
+
 	if sev, ok := scoreToSeverity(rec.UserRiskData.Score); ok {
 		return sev
 	}
@@ -420,6 +426,9 @@ func (b *cefBuilder) addInt64(key string, value int64) {
 
 func (b *cefBuilder) addLabeled(labelKey, labelValue, key, value string) {
 	if value == "" {
+		if labelValue != "" {
+			b.extensions = append(b.extensions, fmt.Sprintf("%s=%s", labelKey, escapeCEFValue(labelValue)))
+		}
 		return
 	}
 	if labelValue != "" {
@@ -457,14 +466,12 @@ func appendSourceExtensions(builder *cefBuilder, clientIP string) {
 
 	if strings.Contains(clientIP, ":") {
 		builder.add("c6a2Label", "Source IPv6 Address")
-		builder.add("c6a2", clientIP)
 	}
 	builder.add("src", clientIP)
 }
 
 func appendDestinationExtensions(builder *cefBuilder, msg HTTPMessage) {
 	if msg.Host != "" {
-		builder.add("dst", msg.Host)
 		builder.add("dhost", msg.Host)
 	}
 	builder.add("dpt", msg.Port)
@@ -479,7 +486,6 @@ func appendRuleExtensions(builder *cefBuilder, rec SIEMRecord) {
 	cs5 := rec.UserRiskData.Risk
 	cs6 := rec.HTTPMessage.RequestID
 
-	builder.add("msg", msg)
 	builder.addLabeled("cs1Label", "Rules", "cs1", cs1)
 	builder.addLabeled("cs2Label", "Rule Messages", "cs2", cs2)
 	builder.addLabeled("cs3Label", "Rule Data", "cs3", cs3)
