@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"log/syslog"
 	"net"
 	"net/http"
 	"net/url"
@@ -28,7 +27,7 @@ type Options struct {
 	Follow          bool          `short:"f" long:"follow" description:"Continue retrieving messages"`
 	Interval        time.Duration `short:"i" long:"interval" description:"Interval of message retrieval" default:"5m"`
 	Format          string        `long:"format" description:"Output format (json or cef)" default:"cef"`
-	Syslog          string        `long:"syslog" description:"Syslog target URL (e.g., tcp://127.0.0.1:514 or udp://127.0.0.1:514)"`
+	Syslog          string        `long:"syslog" description:"CEF target URL over TCP/UDP (e.g., tcp://127.0.0.1:514 or udp://127.0.0.1:514)"`
 	EdgeGridFile    string        `short:"r" long:"file" description:"Location of EdgeGrid file" default:"~/.edgerc"`
 	EdgeGridSection string        `short:"s" long:"section" description:"Section of EdgeGrid file" default:"default"`
 	Host            string        `long:"host" env:"EDGEGRID_HOST" description:"EdgeGrid Host"`
@@ -46,7 +45,7 @@ func (o *Options) validate() error {
 		return fmt.Errorf("unsupported output format: %s", o.Format)
 	}
 	if o.Syslog != "" && o.Format != "cef" {
-		return fmt.Errorf("syslog requires --format cef")
+		return fmt.Errorf("remote socket output requires --format cef")
 	}
 	return nil
 }
@@ -514,7 +513,7 @@ func appendContextExtensions(builder *cefBuilder, rec SIEMRecord) {
 	builder.add("AkamaiSiemASN", rec.Geo.ASN)
 }
 
-func newSyslogWriter(target string) (*syslog.Writer, error) {
+func newSocketConn(target string) (net.Conn, error) {
 	if target == "" {
 		return nil, nil
 	}
@@ -526,34 +525,34 @@ func newSyslogWriter(target string) (*syslog.Writer, error) {
 
 	network := strings.ToLower(u.Scheme)
 	if network != "tcp" && network != "udp" {
-		return nil, fmt.Errorf("unsupported syslog scheme: %s", u.Scheme)
+		return nil, fmt.Errorf("unsupported target scheme: %s", u.Scheme)
 	}
 
 	host := u.Host
 	if host == "" {
-		return nil, fmt.Errorf("syslog target missing host")
+		return nil, fmt.Errorf("target missing host")
 	}
 
 	if _, _, err := net.SplitHostPort(host); err != nil {
 		host = net.JoinHostPort(host, "514")
 	}
 
-	return syslog.Dial(network, host, syslog.LOG_INFO|syslog.LOG_DAEMON, "akamai-siem-receiver")
+	return net.Dial(network, host)
 }
 
 type recordSink struct {
 	format  string
-	syslog  *syslog.Writer
+	conn    net.Conn
 	encoder *json.Encoder
 }
 
-func newRecordSink(format string, syslogWriter *syslog.Writer) *recordSink {
+func newRecordSink(format string, conn net.Conn) *recordSink {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetEscapeHTML(false)
 
 	return &recordSink{
 		format:  format,
-		syslog:  syslogWriter,
+		conn:    conn,
 		encoder: enc,
 	}
 }
@@ -561,9 +560,9 @@ func newRecordSink(format string, syslogWriter *syslog.Writer) *recordSink {
 func (s *recordSink) EmitRecord(rec SIEMRecord) {
 	if s.format == "cef" {
 		cef := buildCEF(rec)
-		if s.syslog != nil {
-			if err := s.syslog.Info(cef); err != nil {
-				fmt.Fprintf(os.Stderr, "failed to send syslog message: %v\n", err)
+		if s.conn != nil {
+			if _, err := fmt.Fprintf(s.conn, "%s\n", cef); err != nil {
+				fmt.Fprintf(os.Stderr, "failed to send message: %v\n", err)
 			}
 			return
 		}
@@ -686,15 +685,15 @@ func run() error {
 		return err
 	}
 
-	syslogWriter, err := newSyslogWriter(opts.Syslog)
+	conn, err := newSocketConn(opts.Syslog)
 	if err != nil {
 		return err
 	}
-	if syslogWriter != nil {
-		defer syslogWriter.Close()
+	if conn != nil {
+		defer conn.Close()
 	}
 
-	sink := newRecordSink(opts.Format, syslogWriter)
+	sink := newRecordSink(opts.Format, conn)
 
 	edgerc, err := loadEdgeGridConfig(opts)
 	if err != nil {
