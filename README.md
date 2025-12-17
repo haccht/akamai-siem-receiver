@@ -28,52 +28,30 @@ Help Options:
   -h, --help           Show this help message
 ```
 
-Run this tool with the WAF Config ID and you will get the Multi-JSON responses (use `--format json` to override the default CEF output).
-Each event is listed on its own line, and the last line provides metadata on the whole batch.
-
-```
-$ akamai-siem-receiver --config 100000 --follow
-{"attackData": {...}, "httpMessage": {...}, ...}
-{"attackData": {...}, "httpMessage": {...}, ...}
-{"attackData": {...}, "httpMessage": {...}, ...}
-{"offset": "...", "total": 10000, "limit": 10000}
-{"attackData": {...}, "httpMessage": {...}, ...}
-{"attackData": {...}, "httpMessage": {...}, ...}
-{"attackData": {...}, "httpMessage": {...}, ...}
-{"offset": "...", "total": 10000, "limit": 10000}
-```
-
-When `--format cef` is used (the default), Akamai SIEM records are emitted as CEF while metadata lines (offset/total/limit) remain JSON and the `--follow` behavior is unchanged. Example:
+When `--format cef` is used (the default), Akamai SIEM records are emitted as CEF. Example:
 
 ```
 $ akamai-siem-receiver --config 100000 --format cef
 CEF:0|Akamai|SIEM Receiver|1.0|qik1_26545|SQL Injection Attack (SmartDetect)|10 src=192.0.2.82 dst=www.hmapi.com dpt=443 requestMethod=POST request=POST /?option=com_jce telnet.exe end=1491303422000 msg=Unknown Bots (HTTP Libraries); SQL Injection Attack (SmartDetect); SQL Injection Attack cs1Label=ruleMessages cs1=Unknown Bots (HTTP Libraries); SQL Injection Attack (SmartDetect); SQL Injection Attack cs2Label=ruleTags cs2=AKAMAI/BOT/UNKNOWN_BOT; ASE/WEB_ATTACK/SQLI; ASE/WEB_ATTACK/SQLI
 ```
 
-To forward output directly to a collector over raw TCP/UDP sockets (without wrapping in RFC 3164/5424 syslog envelopes), provide `--target` (supported schemes: `tcp` and `udp`). When omitted, output is written to stdout. Metadata lines follow the selected format (CEF with JSON metadata or all JSON) and are sent to the same target. TCP/UDP targets are reconnected automatically on broken pipe/reset errors to continue delivery:
+To forward output directly to a collector over raw TCP/UDP sockets, provide `--target`. When omitted, output is written to stdout.
 
 ```
 $ akamai-siem-receiver --config 100000 --target tcp://127.0.0.1:514
 ```
 
-CEF field mapping highlights:
+When `--format json` is used, this tool will display the Multi-JSON responses.
 
-- `attackData.clientIP` → `src`
-- `httpMessage.host` → `dst`/`dhost`; `httpMessage.port` → `dpt`
-- `httpMessage.method`/`path`/`query` → `requestMethod`/`request` (scheme inferred from TLS presence)
-- `attackData.rules` → `cs1` (with `cs1Label=Rules`)
-- `attackData.ruleMessages` → `msg` and `cs2` (with `cs2Label=Rule Messages`)
-- `attackData.ruleData` → `cs3` (with `cs3Label=Rule Data`); `attackData.ruleSelectors` → `cs4` (with `cs4Label=Rule Selectors`)
-- `userRiskData.risk` → `cs5` (with `cs5Label=Client Reputation`); `httpMessage.requestId` → `cs6` (with `cs6Label=API ID` and `devicePayloadId`)
-- `attackData.configId` → `flexString1` (with `flexString1Label=Security Config Id`); `attackData.policyId` → `flexString2` (with `flexString2Label=Firewall Policy Id`)
-- `httpMessage.bytes` → `out`
-- `httpMessage.start` (Unix seconds) → `start` (Unix seconds)
-- `attackData.ruleTags` → `AkamaiSiemRuleTags`; `attackData.ruleActions` → `AkamaiSiemRuleActions`
-- `identity.ja4` (or `httpMessage.ja4`) → `AkamaiSiemJA4`; `identity.tlsFingerprintV2`/`identity.tlsFingerprintV3` (or legacy `httpMessage` fields) → `AkamaiSiemAKTLSFPv2`/`AkamaiSiemAKTLSFPv3`
-- `httpMessage.tlsVersion` (or `httpMessage.tls`) → `AkamaiSiemTLSVersion`
-- request/response headers, geo fields, and response status are passed through with `AkamaiSiem*` prefixes
-- Calculated fields per TechDocs: `attackData.appliedAction` drives `eventClassId` (`detect` for `alert`/`monitor`, else `mitigate`), which sets the CEF signature ID, `name` (`Activity detected` vs `Activity mitigated`), and `severity` (`5` vs `10`).
-
+```
+$ akamai-siem-receiver --config 100000 --follow
+{"attackData": {...}, "httpMessage": {...}, ...}
+{"attackData": {...}, "httpMessage": {...}, ...}
+{"attackData": {...}, "httpMessage": {...}, ...}
+{"attackData": {...}, "httpMessage": {...}, ...}
+{"attackData": {...}, "httpMessage": {...}, ...}
+{"attackData": {...}, "httpMessage": {...}, ...}
+```
 
 The events now arrive with URL-encoded, base64-encoded rule fields and identity fingerprints. Sample JSON line is as follows.
 

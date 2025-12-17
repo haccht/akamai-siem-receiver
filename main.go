@@ -28,7 +28,7 @@ type Options struct {
 	Limit           int           `long:"limit" description:"The approximate maximum number of security events each fetch returns" default:"10000"`
 	Follow          bool          `short:"f" long:"follow" description:"Continue retrieving messages"`
 	Interval        time.Duration `short:"i" long:"interval" description:"Interval of message retrieval" default:"5m"`
-	Format          string        `long:"format" description:"Output format (json or cef)" default:"cef"`
+    Format          string        `long:"format" description:"Output format (json or cef)" enum:"json" enum:"cef" default:"cef"`
 	Target          string        `long:"target" description:"Output target URL over TCP/UDP (e.g., tcp://127.0.0.1:514 or udp://127.0.0.1:514)"`
 	EdgeGridFile    string        `short:"r" long:"file" description:"Location of EdgeGrid file" default:"~/.edgerc"`
 	EdgeGridSection string        `short:"s" long:"section" description:"Section of EdgeGrid file" default:"default"`
@@ -36,17 +36,6 @@ type Options struct {
 	ClientToken     string        `long:"client-token" env:"EDGEGRID_CLIENT_TOKEN" description:"EdgeGrid ClientToken"`
 	ClientSecret    string        `long:"client-secret" env:"EDGEGRID_CLIENT_SECRET" description:"EdgeGrid ClientSecret"`
 	AccessToken     string        `long:"access-token" env:"EDGEGRID_ACCESS_TOKEN" description:"EdgeGrid AccessToken"`
-}
-
-func (o *Options) normalize() {
-	o.Format = strings.ToLower(o.Format)
-}
-
-func (o *Options) validate() error {
-	if o.Format != "json" && o.Format != "cef" {
-		return fmt.Errorf("unsupported output format: %s", o.Format)
-	}
-	return nil
 }
 
 type SIEMRecord struct {
@@ -811,11 +800,6 @@ func run() error {
 			os.Exit(0)
 		}
 		os.Exit(1)
-	}
-
-	opts.normalize()
-	if err := opts.validate(); err != nil {
-		return err
 	}
 
 	target, err := parseSocketTarget(opts.Target)
