@@ -548,7 +548,7 @@ func formatHeaderLines(lines []string) string {
 		}
 	}
 
-	return strings.Join(formatted, "\n")
+	return strings.Join(formatted, "\\n")
 }
 
 type socketTarget struct {
